@@ -7,6 +7,7 @@ import base64
 import streamlit as st
 
 from folder_picker import pick_folder
+from localhost import is_localhost_request
 from gemini_client import chat as gemini_chat
 from gemini_client import list_models as list_gemini_models
 from mcp_client import call_tool, get_server_details
@@ -18,13 +19,39 @@ from ollama_client import get_model_info as get_ollama_model_info
 from ollama_client import list_embedding_models
 from ollama_client import list_models as list_ollama_models
 from rag_store import RagStore
+from web_search import augment_prompt_with_web_search, search_web
 
-st.set_page_config(page_title="LLM Chat", layout="wide")
+show_sidebar = is_localhost_request()
+
+st.set_page_config(
+    page_title="LLM Chat",
+    layout="wide",
+    initial_sidebar_state="expanded" if show_sidebar else "collapsed",
+)
+
+_sidebar_css = (
+    """
+    [data-testid="stSidebar"] { min-width: 320px; max-width: 360px; }
+    """
+    if show_sidebar
+    else """
+    [data-testid="stSidebar"],
+    [data-testid="stSidebarCollapsedControl"],
+    [data-testid="collapsedControl"] {
+        display: none !important;
+    }
+    section[data-testid="stMain"] > div {
+        max-width: 100% !important;
+    }
+    """
+)
 
 st.markdown(
     """
     <style>
-    [data-testid="stSidebar"] { min-width: 320px; max-width: 360px; }
+    """
+    + _sidebar_css
+    + """
     .block-container { padding-top: 1.5rem; }
     .model-capabilities {
         background: #f0f4f8;
@@ -54,6 +81,20 @@ st.markdown(
         color: #718096;
         font-size: 0.8rem;
         margin-top: 0.5rem;
+    }
+    .web-source {
+        border-left: 3px solid #cbd5e0;
+        margin: 0.35rem 0;
+        padding-left: 0.75rem;
+    }
+    .web-source-title {
+        font-size: 0.9rem;
+        font-weight: 600;
+    }
+    .web-source-snippet {
+        color: #4a5568;
+        font-size: 0.82rem;
+        margin-top: 0.15rem;
     }
     </style>
     """,
@@ -200,7 +241,29 @@ def render_rag_details_panel(index_info: dict) -> None:
             st.write(f"- `{source}`")
 
 
+def render_web_sources(sources: list[dict]) -> None:
+    if not sources:
+        return
+
+    with st.expander(f"Sources ({len(sources)})", expanded=False):
+        for index, source in enumerate(sources, start=1):
+            title = source.get("title") or f"Source {index}"
+            url = source.get("url") or ""
+            snippet = source.get("snippet") or ""
+            st.markdown(
+                f"""
+                <div class="web-source">
+                    <div class="web-source-title">[{index}] <a href="{url}" target="_blank">{title}</a></div>
+                    <div class="web-source-snippet">{snippet}</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+
 def render_message(message: dict) -> None:
+    if message.get("web_sources"):
+        render_web_sources(message["web_sources"])
     if message.get("content"):
         st.markdown(message["content"])
     if message.get("image_b64"):
@@ -245,6 +308,17 @@ def render_ollama_capabilities(model: str) -> None:
     )
 
 
+def default_ollama_model() -> str:
+    models = list_ollama_models()
+    if not models:
+        st.error("No Ollama models found. Start Ollama and pull a model first.")
+        st.stop()
+    for model in models:
+        if not model_supports_image_generation(model):
+            return model
+    return models[0]
+
+
 def load_gemini_models(api_key: str) -> None:
     if not api_key.strip():
         st.session_state.gemini_models = []
@@ -261,182 +335,219 @@ def load_gemini_models(api_key: str) -> None:
         st.session_state.gemini_load_error = str(exc)
 
 
-with st.sidebar:
-    st.title("Settings")
+if show_sidebar:
+    with st.sidebar:
+        st.title("Settings")
 
-    provider = st.radio(
-        "Provider",
-        ["Ollama", "Google Gemini"],
-        key="provider",
-        horizontal=True,
-    )
-
-    selected_model: str | None = None
-
-    if provider == "Ollama":
-        models = list_ollama_models()
-        if not models:
-            st.error("No Ollama models found. Start Ollama and pull a model first.")
-            st.stop()
-        selected_model = st.selectbox("Model", models, key="ollama_model")
-    else:
-        gemini_api_key = st.text_input(
-            "Gemini API key",
-            type="password",
-            placeholder="Enter your Google AI API key",
-            key="gemini_api_key",
-        )
-        if st.button("Load models", width="stretch"):
-            load_gemini_models(gemini_api_key)
-
-        load_error = st.session_state.get("gemini_load_error")
-        if load_error:
-            st.error(f"Failed to load models: {load_error}")
-
-        gemini_models = st.session_state.gemini_models
-        if not gemini_models:
-            st.info("Enter your API key and click **Load models**.")
-            st.stop()
-
-        selected_model = st.selectbox("Model", gemini_models, key="gemini_model")
-
-    is_image_mode = (
-        provider == "Ollama"
-        and selected_model is not None
-        and model_supports_image_generation(selected_model)
-    )
-
-    if is_image_mode:
-        image_width = st.slider(
-            "Width",
-            min_value=256,
-            max_value=1024,
-            value=1024,
-            step=64,
-            key="image_width",
-        )
-        image_height = st.slider(
-            "Height",
-            min_value=256,
-            max_value=1024,
-            value=1024,
-            step=64,
-            key="image_height",
-        )
-        image_steps = st.slider(
-            "Steps",
-            min_value=0,
-            max_value=50,
-            value=0,
-            step=1,
-            help="0 uses the model's recommended step count.",
-            key="image_steps",
-        )
-    else:
-        system_prompt = st.text_area(
-            "System prompt",
-            height=160,
-            placeholder="You are a helpful assistant.",
-            key="system_prompt",
+        provider = st.radio(
+            "Provider",
+            ["Ollama", "Google Gemini"],
+            key="provider",
+            horizontal=True,
         )
 
-        temperature = st.slider(
-            "Temperature",
-            min_value=0.0,
-            max_value=1.0,
-            value=0.7,
-            step=0.05,
-            key="temperature",
+        selected_model: str | None = None
+
+        if provider == "Ollama":
+            models = list_ollama_models()
+            if not models:
+                st.error("No Ollama models found. Start Ollama and pull a model first.")
+                st.stop()
+            selected_model = st.selectbox("Model", models, key="ollama_model")
+        else:
+            gemini_api_key = st.text_input(
+                "Gemini API key",
+                type="password",
+                placeholder="Enter your Google AI API key",
+                key="gemini_api_key",
+            )
+            if st.button("Load models", width="stretch"):
+                load_gemini_models(gemini_api_key)
+
+            load_error = st.session_state.get("gemini_load_error")
+            if load_error:
+                st.error(f"Failed to load models: {load_error}")
+
+            gemini_models = st.session_state.gemini_models
+            if not gemini_models:
+                st.info("Enter your API key and click **Load models**.")
+                st.stop()
+
+            selected_model = st.selectbox("Model", gemini_models, key="gemini_model")
+
+        is_image_mode = (
+            provider == "Ollama"
+            and selected_model is not None
+            and model_supports_image_generation(selected_model)
         )
 
-        top_k = st.slider(
-            "Top K",
-            min_value=1,
-            max_value=10,
-            value=5,
-            step=1,
-            key="top_k",
+        if is_image_mode:
+            image_width = st.slider(
+                "Width",
+                min_value=256,
+                max_value=1024,
+                value=1024,
+                step=64,
+                key="image_width",
+            )
+            image_height = st.slider(
+                "Height",
+                min_value=256,
+                max_value=1024,
+                value=1024,
+                step=64,
+                key="image_height",
+            )
+            image_steps = st.slider(
+                "Steps",
+                min_value=0,
+                max_value=50,
+                value=0,
+                step=1,
+                help="0 uses the model's recommended step count.",
+                key="image_steps",
+            )
+        else:
+            system_prompt = st.text_area(
+                "System prompt",
+                height=160,
+                placeholder="You are a helpful assistant.",
+                key="system_prompt",
+            )
+
+            temperature = st.slider(
+                "Temperature",
+                min_value=0.0,
+                max_value=1.0,
+                value=0.7,
+                step=0.05,
+                key="temperature",
+            )
+
+            top_k = st.slider(
+                "Top K",
+                min_value=1,
+                max_value=10,
+                value=5,
+                step=1,
+                key="top_k",
+            )
+
+            st.divider()
+            web_search_enabled = st.toggle(
+                "Web search",
+                value=False,
+                key="web_search_enabled",
+                help="Search the web and summarize results with citations.",
+            )
+            if web_search_enabled:
+                web_search_max_results = st.slider(
+                    "Web results",
+                    min_value=3,
+                    max_value=10,
+                    value=5,
+                    step=1,
+                    key="web_search_max_results",
+                )
+            else:
+                web_search_max_results = 5
+
+        supports_tools = (
+            selected_model is not None
+            and model_supports_tool_calling(provider, selected_model)
+            and not is_image_mode
+        )
+        supports_rag = (
+            selected_model is not None
+            and model_supports_rag(provider, selected_model, is_image_mode=is_image_mode)
         )
 
-    supports_tools = (
-        selected_model is not None
-        and model_supports_tool_calling(provider, selected_model)
-        and not is_image_mode
-    )
-    supports_rag = (
-        selected_model is not None
-        and model_supports_rag(provider, selected_model, is_image_mode=is_image_mode)
-    )
+        selected_mcp_server: str | None = None
+        rag_folder_path = ""
+        rag_embedding_model: str | None = None
 
-    selected_mcp_server: str | None = None
+        if supports_tools:
+            st.divider()
+            st.subheader("MCP server")
+            mcp_servers = list_mcp_server_names()
+            if not mcp_servers:
+                st.info("Add servers in `chatbot/mcp_servers.json` or `~/.cursor/mcp.json`.")
+            else:
+                selected_mcp_server = st.selectbox(
+                    "MCP server",
+                    mcp_servers,
+                    key="mcp_server",
+                )
+                if st.button("Load MCP details", width="stretch"):
+                    with st.spinner("Connecting to MCP server..."):
+                        st.session_state.mcp_details = get_server_details(selected_mcp_server)
+
+        if supports_rag:
+            st.divider()
+            st.subheader("RAG / Vector DB")
+            browse_col, folder_col = st.columns([1, 5])
+            with browse_col:
+                st.markdown("<div style='height:1.75rem'></div>", unsafe_allow_html=True)
+                if st.button("📁", key="rag_folder_browse", width="stretch", help="Choose folder"):
+                    selected = pick_folder(st.session_state.get("rag_folder_path", ""))
+                    if selected:
+                        st.session_state.rag_folder_path = selected
+                        st.rerun()
+            with folder_col:
+                rag_folder_path = st.text_input(
+                    "Folder path",
+                    placeholder="Click 📁 or enter a path",
+                    key="rag_folder_path",
+                    help="Click the folder icon to open the native folder picker.",
+                )
+            embedding_models = list_embedding_models()
+            if not embedding_models:
+                st.warning("Pull an embedding model first, e.g. `ollama pull nomic-embed-text`.")
+            else:
+                rag_embedding_model = st.selectbox(
+                    "Embedding model",
+                    embedding_models,
+                    key="rag_embedding_model",
+                )
+                if st.button("Build vector DB", width="stretch"):
+                    if not rag_folder_path.strip():
+                        st.error("Enter a folder path to index.")
+                    else:
+                        with st.spinner("Indexing documents..."):
+                            try:
+                                store = RagStore()
+                                st.session_state.rag_index_info = store.build_from_folder(
+                                    rag_folder_path.strip(),
+                                    rag_embedding_model,
+                                )
+                            except Exception as exc:
+                                st.error(str(exc))
+
+            if st.session_state.rag_index_info:
+                info = st.session_state.rag_index_info
+                st.caption(
+                    f"Indexed **{info.get('file_count', 0)}** files · "
+                    f"**{info.get('chunk_count', 0)}** chunks"
+                )
+
+        st.button("Clear chat", on_click=clear_chat, width="stretch")
+else:
+    provider = "Ollama"
+    selected_model = default_ollama_model()
+    is_image_mode = model_supports_image_generation(selected_model)
+    image_width = 1024
+    image_height = 1024
+    image_steps = 0
+    system_prompt = ""
+    temperature = 0.7
+    top_k = 5
+    web_search_enabled = False
+    web_search_max_results = 5
+    supports_tools = False
+    supports_rag = False
+    selected_mcp_server = None
     rag_folder_path = ""
-    rag_embedding_model: str | None = None
-
-    if supports_tools:
-        st.divider()
-        st.subheader("MCP server")
-        mcp_servers = list_mcp_server_names()
-        if not mcp_servers:
-            st.info("Add servers in `chatbot/mcp_servers.json` or `~/.cursor/mcp.json`.")
-        else:
-            selected_mcp_server = st.selectbox(
-                "MCP server",
-                mcp_servers,
-                key="mcp_server",
-            )
-            if st.button("Load MCP details", width="stretch"):
-                with st.spinner("Connecting to MCP server..."):
-                    st.session_state.mcp_details = get_server_details(selected_mcp_server)
-
-    if supports_rag:
-        st.divider()
-        st.subheader("RAG / Vector DB")
-        browse_col, folder_col = st.columns([1, 5])
-        with browse_col:
-            st.markdown("<div style='height:1.75rem'></div>", unsafe_allow_html=True)
-            if st.button("📁", key="rag_folder_browse", width="stretch", help="Choose folder"):
-                selected = pick_folder(st.session_state.get("rag_folder_path", ""))
-                if selected:
-                    st.session_state.rag_folder_path = selected
-                    st.rerun()
-        with folder_col:
-            rag_folder_path = st.text_input(
-                "Folder path",
-                placeholder="Click 📁 or enter a path",
-                key="rag_folder_path",
-                help="Click the folder icon to open the native folder picker.",
-            )
-        embedding_models = list_embedding_models()
-        if not embedding_models:
-            st.warning("Pull an embedding model first, e.g. `ollama pull nomic-embed-text`.")
-        else:
-            rag_embedding_model = st.selectbox(
-                "Embedding model",
-                embedding_models,
-                key="rag_embedding_model",
-            )
-            if st.button("Build vector DB", width="stretch"):
-                if not rag_folder_path.strip():
-                    st.error("Enter a folder path to index.")
-                else:
-                    with st.spinner("Indexing documents..."):
-                        try:
-                            store = RagStore()
-                            st.session_state.rag_index_info = store.build_from_folder(
-                                rag_folder_path.strip(),
-                                rag_embedding_model,
-                            )
-                        except Exception as exc:
-                            st.error(str(exc))
-
-        if st.session_state.rag_index_info:
-            info = st.session_state.rag_index_info
-            st.caption(
-                f"Indexed **{info.get('file_count', 0)}** files · "
-                f"**{info.get('chunk_count', 0)}** chunks"
-            )
-
-    st.button("Clear chat", on_click=clear_chat, width="stretch")
+    rag_embedding_model = None
 
 if provider == "Ollama" and selected_model:
     render_ollama_capabilities(selected_model)
@@ -451,6 +562,8 @@ with detail_cols[1]:
 
 st.title("Image" if is_image_mode else "Chat")
 st.caption(f"**{provider}** · **{selected_model}**")
+if not show_sidebar:
+    st.caption("Settings are available when you open the app at `http://localhost:8501`.")
 
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
@@ -487,23 +600,30 @@ if prompt := st.chat_input(input_placeholder):
                     }
             render_message(assistant_message)
         else:
-            with st.spinner("Thinking..."):
-                try:
-                    chat_prompt = prompt
-                    index_info = st.session_state.rag_index_info
-                    embedding_model = (
-                        rag_embedding_model
-                        or (index_info or {}).get("embedding_model")
-                    )
-                    if supports_rag and index_info and embedding_model:
+            web_sources: list[dict] = []
+            try:
+                chat_prompt = prompt
+                index_info = st.session_state.rag_index_info
+                embedding_model = (
+                    rag_embedding_model
+                    or (index_info or {}).get("embedding_model")
+                )
+                if supports_rag and index_info and embedding_model:
+                    with st.spinner("Searching knowledge base..."):
                         rag_context = build_rag_context(
                             prompt,
                             index_info,
                             embedding_model,
                             top_k=top_k,
                         )
-                        chat_prompt = augment_prompt_with_rag(prompt, rag_context)
+                    chat_prompt = augment_prompt_with_rag(prompt, rag_context)
 
+                if web_search_enabled:
+                    with st.spinner("Searching the web..."):
+                        web_sources = search_web(prompt, max_results=web_search_max_results)
+                    chat_prompt = augment_prompt_with_web_search(chat_prompt, web_sources)
+
+                with st.spinner("Thinking..."):
                     mcp_details = st.session_state.mcp_details
                     use_mcp_tools = (
                         provider == "Ollama"
@@ -546,9 +666,15 @@ if prompt := st.chat_input(input_placeholder):
                             temperature=temperature,
                             top_k=top_k,
                         )
-                except Exception as exc:
-                    reply = f"Error: {exc}"
-            st.markdown(reply)
-            assistant_message = {"role": "assistant", "content": reply}
+            except Exception as exc:
+                reply = f"Error: {exc}"
+                web_sources = []
+
+            render_message({"role": "assistant", "content": reply, "web_sources": web_sources})
+            assistant_message = {
+                "role": "assistant",
+                "content": reply,
+                "web_sources": web_sources,
+            }
 
     st.session_state.messages.append(assistant_message)
