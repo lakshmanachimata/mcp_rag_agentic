@@ -1,0 +1,21 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Chatbot: Streamlit App",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "streamlit",
+      "args": [
+        "run",
+        "app.py",
+        "--server.port=8502",
+        "--server.headless=true"
+      ],
+      "cwd": "${workspaceFolder}/chatbot",
+      "python": "${workspaceFolder}/chatbot/.venv/bin/python",
+      "console": "integratedTerminal",
+      "justMyCode": true
+    }
+  ]
+}

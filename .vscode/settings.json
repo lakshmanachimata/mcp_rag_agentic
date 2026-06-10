@@ -1,0 +1,4 @@
+{
+  "python.defaultInterpreterPath": "${workspaceFolder}/chatbot/.venv/bin/python",
+  "python.terminal.activateEnvironment": true
+}
