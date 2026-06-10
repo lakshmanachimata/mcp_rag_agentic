@@ -2,6 +2,53 @@
 
 from __future__ import annotations
 
+import re
+
+_WEB_ONLY_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(
+        r"^(?:please\s+)?(?:only\s+)?(?:do\s+a\s+)?web\s+search(?:\s+(?:the\s+)?web)?(?:\s+for)?\s+(.+)$",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"^(?:please\s+)?(?:only\s+)?search(?:\s+(?:the\s+)?web|\s+online|\s+the\s+internet)?(?:\s+for)?\s+(.+)$",
+        re.IGNORECASE,
+    ),
+    re.compile(r"^(?:please\s+)?(?:only\s+)?google\s+(.+)$", re.IGNORECASE),
+    re.compile(
+        r"^(?:please\s+)?(?:only\s+)?look\s+up\s+(.+?)(?:\s+online|\s+on\s+the\s+web)?$",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"^(?:please\s+)?(?:only\s+)?find\s+(.+?)\s+on\s+the\s+(?:web|internet)$",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"^(?:please\s+)?(?:only\s+)?browse(?:\s+the\s+web)?(?:\s+for)?\s+(.+)$",
+        re.IGNORECASE,
+    ),
+)
+
+
+def extract_web_search_query(prompt: str) -> str | None:
+    """Return the search query when the prompt asks for web search only."""
+    text = prompt.strip()
+    if not text:
+        return None
+
+    for pattern in _WEB_ONLY_PATTERNS:
+        match = pattern.match(text)
+        if not match:
+            continue
+        query = match.group(1).strip().rstrip(".?!")
+        if query:
+            return query
+    return None
+
+
+def is_web_search_only_request(prompt: str) -> bool:
+    """Return True when the user wants results from the web only."""
+    return extract_web_search_query(prompt) is not None
+
 
 def search_web(query: str, max_results: int = 5) -> list[dict]:
     """Search the web and return title, url, and snippet for each result."""

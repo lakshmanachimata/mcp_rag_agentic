@@ -19,7 +19,7 @@ from ollama_client import get_model_info as get_ollama_model_info
 from ollama_client import list_embedding_models
 from ollama_client import list_models as list_ollama_models
 from rag_store import RagStore
-from web_search import augment_prompt_with_web_search, search_web
+from web_search import extract_web_search_query, is_web_search_only_request, search_web
 
 show_sidebar = is_localhost_request()
 
@@ -243,29 +243,31 @@ def render_rag_details_panel(index_info: dict) -> None:
 
 def render_web_sources(sources: list[dict]) -> None:
     if not sources:
+        st.caption("No web results found for this query.")
         return
 
-    with st.expander(f"Sources ({len(sources)})", expanded=False):
-        for index, source in enumerate(sources, start=1):
-            title = source.get("title") or f"Source {index}"
-            url = source.get("url") or ""
-            snippet = source.get("snippet") or ""
-            st.markdown(
-                f"""
-                <div class="web-source">
-                    <div class="web-source-title">[{index}] <a href="{url}" target="_blank">{title}</a></div>
-                    <div class="web-source-snippet">{snippet}</div>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
+    for index, source in enumerate(sources, start=1):
+        title = source.get("title") or f"Source {index}"
+        url = source.get("url") or ""
+        snippet = source.get("snippet") or ""
+        st.markdown(
+            f"""
+            <div class="web-source">
+                <div class="web-source-title">[{index}] <a href="{url}" target="_blank">{title}</a></div>
+                <div class="web-source-snippet">{snippet}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
 
 def render_message(message: dict) -> None:
-    if message.get("web_sources"):
-        render_web_sources(message["web_sources"])
     if message.get("content"):
+        st.markdown("**LLM**")
         st.markdown(message["content"])
+    if message.get("web_sources") is not None:
+        st.markdown("**Web search**")
+        render_web_sources(message["web_sources"])
     if message.get("image_b64"):
         st.image(base64.b64decode(message["image_b64"]), width="stretch")
 
@@ -436,9 +438,9 @@ if show_sidebar:
             st.divider()
             web_search_enabled = st.toggle(
                 "Web search",
-                value=False,
+                value=True,
                 key="web_search_enabled",
-                help="Search the web and summarize results with citations.",
+                help="Search the web and show results in a separate section.",
             )
             if web_search_enabled:
                 web_search_max_results = st.slider(
@@ -541,7 +543,7 @@ else:
     system_prompt = ""
     temperature = 0.7
     top_k = 5
-    web_search_enabled = False
+    web_search_enabled = True
     web_search_max_results = 5
     supports_tools = False
     supports_rag = False
@@ -600,81 +602,93 @@ if prompt := st.chat_input(input_placeholder):
                     }
             render_message(assistant_message)
         else:
-            web_sources: list[dict] = []
+            web_sources: list[dict] | None = None
+            reply: str | None = None
+            web_only = is_web_search_only_request(prompt)
             try:
-                chat_prompt = prompt
-                index_info = st.session_state.rag_index_info
-                embedding_model = (
-                    rag_embedding_model
-                    or (index_info or {}).get("embedding_model")
-                )
-                if supports_rag and index_info and embedding_model:
-                    with st.spinner("Searching knowledge base..."):
-                        rag_context = build_rag_context(
-                            prompt,
-                            index_info,
-                            embedding_model,
-                            top_k=top_k,
-                        )
-                    chat_prompt = augment_prompt_with_rag(prompt, rag_context)
-
-                if web_search_enabled:
+                if web_only:
+                    search_query = extract_web_search_query(prompt) or prompt
                     with st.spinner("Searching the web..."):
-                        web_sources = search_web(prompt, max_results=web_search_max_results)
-                    chat_prompt = augment_prompt_with_web_search(chat_prompt, web_sources)
-
-                with st.spinner("Thinking..."):
-                    mcp_details = st.session_state.mcp_details
-                    use_mcp_tools = (
-                        provider == "Ollama"
-                        and supports_tools
-                        and selected_mcp_server
-                        and mcp_details
-                        and mcp_details.get("ollama_tools")
-                        and not mcp_details.get("error")
+                        web_sources = search_web(
+                            search_query,
+                            max_results=web_search_max_results,
+                        )
+                else:
+                    chat_prompt = prompt
+                    index_info = st.session_state.rag_index_info
+                    embedding_model = (
+                        rag_embedding_model
+                        or (index_info or {}).get("embedding_model")
                     )
+                    if supports_rag and index_info and embedding_model:
+                        with st.spinner("Searching knowledge base..."):
+                            rag_context = build_rag_context(
+                                prompt,
+                                index_info,
+                                embedding_model,
+                                top_k=top_k,
+                            )
+                        chat_prompt = augment_prompt_with_rag(prompt, rag_context)
 
-                    if use_mcp_tools:
-                        server_name = selected_mcp_server
+                    if web_search_enabled:
+                        with st.spinner("Searching the web..."):
+                            web_sources = search_web(
+                                prompt,
+                                max_results=web_search_max_results,
+                            )
 
-                        def handle_tool(tool_name: str, arguments: dict) -> str:
-                            return call_tool(server_name, tool_name, arguments)
+                    with st.spinner("Thinking..."):
+                        mcp_details = st.session_state.mcp_details
+                        use_mcp_tools = (
+                            provider == "Ollama"
+                            and supports_tools
+                            and selected_mcp_server
+                            and mcp_details
+                            and mcp_details.get("ollama_tools")
+                            and not mcp_details.get("error")
+                        )
 
-                        reply = ollama_chat_with_tools(
-                            model=selected_model,
-                            user_prompt=chat_prompt,
-                            tools=mcp_details["ollama_tools"],
-                            tool_handler=handle_tool,
-                            system_prompt=system_prompt,
-                            temperature=temperature,
-                            top_k=top_k,
-                        )
-                    elif provider == "Ollama":
-                        reply = ollama_chat(
-                            model=selected_model,
-                            user_prompt=chat_prompt,
-                            system_prompt=system_prompt,
-                            temperature=temperature,
-                            top_k=top_k,
-                        )
-                    else:
-                        reply = gemini_chat(
-                            api_key=st.session_state.gemini_api_key,
-                            model=selected_model,
-                            user_prompt=chat_prompt,
-                            system_prompt=system_prompt,
-                            temperature=temperature,
-                            top_k=top_k,
-                        )
+                        if use_mcp_tools:
+                            server_name = selected_mcp_server
+
+                            def handle_tool(tool_name: str, arguments: dict) -> str:
+                                return call_tool(server_name, tool_name, arguments)
+
+                            reply = ollama_chat_with_tools(
+                                model=selected_model,
+                                user_prompt=chat_prompt,
+                                tools=mcp_details["ollama_tools"],
+                                tool_handler=handle_tool,
+                                system_prompt=system_prompt,
+                                temperature=temperature,
+                                top_k=top_k,
+                            )
+                        elif provider == "Ollama":
+                            reply = ollama_chat(
+                                model=selected_model,
+                                user_prompt=chat_prompt,
+                                system_prompt=system_prompt,
+                                temperature=temperature,
+                                top_k=top_k,
+                            )
+                        else:
+                            reply = gemini_chat(
+                                api_key=st.session_state.gemini_api_key,
+                                model=selected_model,
+                                user_prompt=chat_prompt,
+                                system_prompt=system_prompt,
+                                temperature=temperature,
+                                top_k=top_k,
+                            )
             except Exception as exc:
                 reply = f"Error: {exc}"
-                web_sources = []
+                web_sources = web_sources or []
 
-            render_message({"role": "assistant", "content": reply, "web_sources": web_sources})
             assistant_message = {
                 "role": "assistant",
                 "content": reply,
-                "web_sources": web_sources,
+                "web_sources": web_sources if (web_only or web_search_enabled) else None,
             }
+            render_message(assistant_message)
 
     st.session_state.messages.append(assistant_message)
