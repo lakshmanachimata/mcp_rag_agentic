@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "filesystem": {
+      "description": "Read and search files on disk",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/Users/lakshmana/Desktop"]
+    }
+  }
+}

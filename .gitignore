@@ -78,3 +78,6 @@ logs/
 debug.log
 *.db
 *.log
+
+# Local vector DB indexes
+chatbot/.vectordb/
