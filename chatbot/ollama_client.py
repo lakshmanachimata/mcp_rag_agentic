@@ -11,6 +11,27 @@ def get_client(host: str = DEFAULT_HOST) -> Client:
     return Client(host=host)
 
 
+def _as_dict(value: object) -> dict:
+    if isinstance(value, dict):
+        return value
+    if hasattr(value, "model_dump"):
+        return value.model_dump()
+    return {}
+
+
+def get_model_info(model: str, host: str = DEFAULT_HOST) -> dict:
+    """Return capabilities and details for an Ollama model."""
+    try:
+        response = get_client(host).show(model=model)
+        raw = _as_dict(response)
+        return {
+            "capabilities": list(raw.get("capabilities") or []),
+            "details": _as_dict(raw.get("details")),
+        }
+    except Exception:
+        return {"capabilities": [], "details": {}}
+
+
 def list_models(host: str = DEFAULT_HOST) -> list[str]:
     """Return names of models available in the local Ollama instance."""
     try:
@@ -24,6 +45,31 @@ def list_models(host: str = DEFAULT_HOST) -> list[str]:
         return sorted(names)
     except Exception:
         return []
+
+
+def generate_image(
+    model: str,
+    prompt: str,
+    width: int = 1024,
+    height: int = 1024,
+    steps: int = 0,
+    host: str = DEFAULT_HOST,
+) -> str:
+    """Generate an image from a text prompt. Returns base64-encoded PNG data."""
+    kwargs: dict = {
+        "model": model,
+        "prompt": prompt,
+        "stream": False,
+        "width": width,
+        "height": height,
+    }
+    if steps > 0:
+        kwargs["steps"] = steps
+
+    response = get_client(host).generate(**kwargs)
+    raw = _as_dict(response)
+    image = raw.get("image") or getattr(response, "image", None) or ""
+    return image
 
 
 def chat(
